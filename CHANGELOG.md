@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `images/example.png` — screenshot used by the README.
+- `images/generate_images/example.html` — HTML source for the screenshot.
+- `images/generate_images/html_to_png.py` — script to render HTML to PNG
+  via `html2image` and `Pillow` with auto-crop.
+
 ### Changed
 - Expand `README.md` with usage, environment variables, keybindings, status
   indicators, and a guide for customising `netrc-manager-check-machine.sh`.
