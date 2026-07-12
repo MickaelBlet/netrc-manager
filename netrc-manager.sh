@@ -92,8 +92,14 @@ parse_args() {
 }
 
 STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/netrc-manager.XXXXXX")"
+TTY_SAVED=""
 cleanup() {
     tput cnorm 2> /dev/null || true
+    # Restore terminal modes if we changed them for the input loop.
+    if [[ -n "${TTY_SAVED}" ]]; then
+        stty "${TTY_SAVED}" < /dev/tty 2> /dev/null || true
+        TTY_SAVED=""
+    fi
     # Stop any in-flight background checks before removing their state dir.
     local pids
     pids="$(jobs -p 2> /dev/null)"
@@ -427,22 +433,49 @@ render() {
     if [[ "${frame}" == "${LAST_FRAME}" ]]; then
         return 0
     fi
+    local prev="${LAST_FRAME}"
     LAST_FRAME="${frame}"
 
-    # Move the cursor up over the previously drawn frame (relative, not absolute)
-    # so we overwrite it in place without clearing the whole screen. On the first
-    # paint LAST_LINES is 0, so the frame is simply printed where the cursor sits.
-    if [[ "${LAST_LINES}" -gt 0 ]]; then
-        printf '\033[%dA' "${LAST_LINES}"
-    fi
-    local line lines=0
+    # Split the frame into logical lines so we can repaint selectively.
+    local line
+    local -a new_lines=() old_lines=()
     while IFS= read -r line; do
-        printf '%s\033[K\n' "${line}"
-        lines=$(( lines + 1 ))
+        new_lines+=("${line}")
     done <<< "${frame}"
-    # Clear any leftover lines from a previously taller frame.
-    printf '\033[J'
-    LAST_LINES="${lines}"
+    local n=${#new_lines[@]}
+
+    # First paint, or the frame changed height (add/delete/resize/wrap): rewrite
+    # the whole frame. Move the cursor up over the previous frame (relative, not
+    # absolute) so we overwrite it in place without clearing the whole screen.
+    if [[ "${LAST_LINES}" -eq 0 || "${n}" -ne "${LAST_LINES}" ]]; then
+        if [[ "${LAST_LINES}" -gt 0 ]]; then
+            printf '\033[%dA' "${LAST_LINES}"
+        fi
+        for line in "${new_lines[@]}"; do
+            printf '%s\033[K\n' "${line}"
+        done
+        # Clear any leftover lines from a previously taller frame.
+        printf '\033[J'
+        LAST_LINES="${n}"
+        return 0
+    fi
+
+    # Same height → repaint only the lines that actually changed. Navigation just
+    # moves the ▶ marker, so at most two rows differ; walk the frame top-down with
+    # relative cursor moves, rewriting changed lines and stepping over the rest.
+    while IFS= read -r line; do
+        old_lines+=("${line}")
+    done <<< "${prev}"
+
+    printf '\033[%dA' "${LAST_LINES}"   # cursor to the top-left of the frame
+    local i
+    for (( i = 0; i < n; i++ )); do
+        if [[ "${new_lines[i]}" == "${old_lines[i]}" ]]; then
+            printf '\033[B'                                    # unchanged → skip
+        else
+            printf '%s\033[K\r\033[B' "${new_lines[i]}"        # rewrite in place
+        fi
+    done
 }
 
 # ── Navigation (wrap-around) ──────────────────────────────────────────────────
@@ -647,13 +680,16 @@ main() {
     fi
 
     tput civis 2> /dev/null || true
+    # Raw, no-echo input so arrow-key escape sequences aren't echoed as ^[[B.
+    TTY_SAVED="$(stty -g < /dev/tty 2> /dev/null || true)"
+    stty -echo -icanon min 0 time 0 < /dev/tty 2> /dev/null || true
     do_refresh
 
     local key rest
     while true; do
         render
         # Auto-refresh when the interval elapses; poll input every second.
-        if read -rsn1 -t 1 key; then
+        if read -rsn1 -t 1 key < /dev/tty; then
             case "${key}" in
                 q|Q) break ;;
                 r|R) do_refresh ;;
@@ -664,7 +700,7 @@ main() {
                 k|K) move_up ;;
                 j|J) move_down ;;
                 $'\033')
-                    read -rsn2 -t 0.01 rest || rest=""
+                    read -rsn2 -t 0.1 rest < /dev/tty || rest=""
                     case "${rest}" in
                         '[A') move_up ;;
                         '[B') move_down ;;
